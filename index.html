@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spice ERP</title>
+<style>
+  :root{--bg:#f4f6fa;--card:#fff;--text:#1d2433;--muted:#667085;--primary:#1a73e8;--on-primary:#fff;--border:#dde2ea;--danger:#d93025;--ok:#188038}
+  @media (prefers-color-scheme: dark){:root{--bg:#12151c;--card:#1c212b;--text:#e8eaf0;--muted:#98a2b3;--primary:#6ea8fe;--on-primary:#0b1220;--border:#2d3442;--danger:#f28b82;--ok:#81c995}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:960px;margin:0 auto;padding:16px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:16px}
+  .login{max-width:380px;margin:12vh auto 0}
+  h1{font-size:22px;margin:0 0 4px} h2{font-size:17px;margin:0 0 12px}
+  .muted{color:var(--muted)} .err{color:var(--danger);min-height:22px;margin:8px 0} .ok{color:var(--ok)}
+  label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
+  input,select{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font:inherit}
+  button{padding:10px 16px;border:0;border-radius:8px;background:var(--primary);color:var(--on-primary);font:inherit;font-weight:600;cursor:pointer}
+  button.sec{background:transparent;color:var(--primary);border:1px solid var(--border)}
+  button.danger{background:transparent;color:var(--danger);border:1px solid var(--border)}
+  button:disabled{opacity:.6;cursor:wait}
+  .full{width:100%;margin-top:14px}
+  header.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;margin-bottom:16px}
+  .actions{display:flex;gap:8px;flex-wrap:wrap}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+  .scroll{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;min-width:640px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
+  th{font-size:12px;color:var(--muted);text-transform:uppercase}
+  td .actions button{padding:6px 10px;font-size:13px}
+  .badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:12px;background:var(--bg);border:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+
+<script>
+/* ===== Settings ===== */
+const API_URL = 'https://script.google.com/macros/s/AKfycbwpv9AgM58E6DXAOf4gQVNVAK5AuuupOEq-EqhYPTAyQ5m9uc8pCGPso9-vg4Pz6lB--Q/exec';
+const IDLE_MINUTES = 30;
+
+/* ===== State ===== */
+let token = sessionStorage.getItem('token') || '';
+let session = null;
+let idleTimer = null;
+
+/* ===== Helpers ===== */
+const app = document.getElementById('app');
+
+function el(tag, props, ...kids) {
+  const e = document.createElement(tag);
+  Object.entries(props || {}).forEach(([k, v]) => {
+    if (k === 'class') e.className = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v);
+  });
+  kids.flat().forEach(k => { if (k !== null && k !== undefined) e.append(k); });
+  return e;
+}
+function field(label, input) { return el('div', {}, el('label', {}, label), input); }
+function clear() { app.replaceChildren(); }
+
+async function api(action, data) {
+  try {
+    const r = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },   // avoids CORS preflight
+      body: JSON.stringify(Object.assign({ action: action, token: token }, data || {}))
+    });
+    const j = await r.json();
+    if (j.error === 'SESSION_EXPIRED') {
+      endSession();
+      showLogin('Session expired. Please log in again.');
+      return { ok: false, error: 'Session expired' };
+    }
+    return j;
+  } catch (e) {
+    return { ok: false, error: 'Network error. Check your connection and try again.' };
+  }
+}
+
+function endSession() {
+  token = ''; session = null;
+  sessionStorage.removeItem('token');
+  clearTimeout(idleTimer);
+}
+
+function resetIdle() {
+  clearTimeout(idleTimer);
+  if (!token) return;
+  idleTimer = setTimeout(() => { endSession(); showLogin('Logged out after inactivity.'); }, IDLE_MINUTES * 60000);
+}
+['click', 'keydown', 'touchstart'].forEach(ev => document.addEventListener(ev, resetIdle));
+
+async function busy(btn, fn) {
+  btn.disabled = true;
+  try { await fn(); } finally { btn.disabled = false; }
+}
+
+/* ===== Login ===== */
+function showLogin(message) {
+  clear();
+  const msg = el('div', { class: 'err' }, message || '');
+  const user = el('input', { type: 'text', autocomplete: 'username', autocapitalize: 'none' });
+  const pass = el('input', { type: 'password', autocomplete: 'current-password' });
+  const btn = el('button', { class: 'full', type: 'button' }, 'Log in');
+
+  async function submit() {
+    msg.textContent = '';
+    if (!user.value.trim() || !pass.value) { msg.textContent = 'Enter username and password.'; return; }
+    await busy(btn, async () => {
+      const j = await api('login', { username: user.value, password: pass.value });
+      if (!j.ok) { msg.textContent = j.error; return; }
+      token = j.token;
+      sessionStorage.setItem('token', token);
+      session = { role: j.role, fullName: j.fullName, username: user.value.trim().toLowerCase() };
+      resetIdle();
+      j.mustChangePassword ? showChangePassword(true) : showHome();
+    });
+  }
+  btn.addEventListener('click', submit);
+  pass.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+
+  app.append(el('div', { class: 'card login' },
+    el('h1', {}, 'Spice ERP'),
+    el('div', { class: 'muted' }, 'Log in to continue'),
+    field('Username', user), field('Password', pass), msg, btn));
+  user.focus();
+}
+
+/* ===== Change password ===== */
+function showChangePassword(forced) {
+  clear();
+  const msg = el('div', { class: 'err' }, forced ? 'You must set a new password before continuing.' : '');
+  const oldP = el('input', { type: 'password', autocomplete: 'current-password' });
+  const newP = el('input', { type: 'password', autocomplete: 'new-password' });
+  const conf = el('input', { type: 'password', autocomplete: 'new-password' });
+  const btn = el('button', { class: 'full', type: 'button' }, 'Save new password');
+
+  btn.addEventListener('click', async () => {
+    msg.textContent = '';
+    if (newP.value !== conf.value) { msg.textContent = 'New passwords do not match.'; return; }
+    await busy(btn, async () => {
+      const j = await api('changePassword', { oldPassword: oldP.value, newPassword: newP.value });
+      if (!j.ok) { msg.textContent = j.error; return; }
+      showHome();
+    });
+  });
+
+  const cancel = forced ? null : el('button', { class: 'sec full', type: 'button', onclick: showHome }, 'Cancel');
+  app.append(el('div', { class: 'card login' },
+    el('h1', {}, 'Change password'),
+    el('div', { class: 'muted' }, '8+ characters, with letters and numbers.'),
+    field('Current password', oldP), field('New password', newP), field('Confirm new password', conf),
+    msg, btn, cancel));
+  oldP.focus();
+}
+
+/* ===== Home shell ===== */
+const ROLE_TEXT = {
+  ADMIN: 'Admin: create Goods Receipts and Issues.',
+  ACCOUNTS: 'Accounts: approve or reject Goods Receipts and Issues, record payments.',
+  MANAGER: 'Manager: view stock, sales, profit and investors.',
+  GM: 'General Manager: dashboard with graphs.',
+  IT: 'IT: user management and system control.'
+};
+
+async function showHome() {
+  clear();
+  if (!session) {
+    const j = await api('me');
+    if (!j.ok) { endSession(); showLogin(j.error); return; }
+    session = { role: j.role, fullName: j.fullName, username: j.username };
+    if (j.mustChangePassword) { showChangePassword(true); return; }
+  }
+  clear();
+  const logout = el('button', { class: 'sec', type: 'button' }, 'Log out');
+  logout.addEventListener('click', async () => { await api('logout'); endSession(); showLogin(''); });
+
+  app.append(el('header', { class: 'bar' },
+    el('div', {}, el('h1', {}, 'Spice ERP'),
+      el('div', { class: 'muted' }, (session.fullName || session.username) + ' · ', el('span', { class: 'badge' }, session.role))),
+    el('div', { class: 'actions' },
+      el('button', { class: 'sec', type: 'button', onclick: () => showChangePassword(false) }, 'Change password'), logout)));
+
+  if (session.role === 'IT') {
+    const holder = el('div', {});
+    app.append(holder);
+    renderUserManagement(holder);
+  } else {
+    app.append(el('div', { class: 'card' }, el('h2', {}, 'Welcome'),
+      el('div', {}, ROLE_TEXT[session.role] || ''),
+      el('p', { class: 'muted' }, 'Your screens will appear here in the next build phases.')));
+  }
+}
+
+/* ===== IT: user management ===== */
+async function renderUserManagement(root) {
+  root.replaceChildren(el('div', { class: 'card muted' }, 'Loading users...'));
+  const j = await api('listUsers');
+  if (!j.ok) { root.replaceChildren(el('div', { class: 'card err' }, j.error)); return; }
+
+  // Create form
+  const msg = el('div', { class: 'err' });
+  const fUser = el('input', { type: 'text', autocapitalize: 'none' });
+  const fName = el('input', { type: 'text' });
+  const fMail = el('input', { type: 'email' });
+  const fRole = el('select', {}, ['ADMIN', 'ACCOUNTS', 'MANAGER', 'GM', 'IT'].map(r => el('option', { value: r }, r)));
+  const fPass = el('input', { type: 'text', autocomplete: 'off', placeholder: 'Temporary password' });
+  const create = el('button', { type: 'button' }, 'Create user');
+  create.addEventListener('click', () => busy(create, async () => {
+    msg.textContent = '';
+    const r = await api('createUser', { username: fUser.value, fullName: fName.value, email: fMail.value, role: fRole.value, tempPassword: fPass.value });
+    if (!r.ok) { msg.textContent = r.error; return; }
+    renderUserManagement(root);
+  }));
+
+  const formCard = el('div', { class: 'card' }, el('h2', {}, 'Create user'),
+    el('div', { class: 'grid' },
+      field('Username', fUser), field('Full name', fName), field('Email', fMail), field('Role', fRole), field('Temporary password', fPass)),
+    msg, el('div', { style: 'margin-top:8px' }, create),
+    el('div', { class: 'muted', style: 'margin-top:8px;font-size:13px' }, 'The user must change this password at first login.'));
+
+  // Users table
+  const tbody = el('tbody', {});
+  j.users.forEach(u => {
+    const isMe = u.username === session.username;
+    const actions = el('div', { class: 'actions' });
+    if (!isMe) {
+      actions.append(
+        el('button', { class: 'sec', type: 'button', onclick: () => doBlock(u) }, u.isLocked ? 'Unblock' : 'Block'),
+        el('button', { class: 'sec', type: 'button', onclick: () => doReset(u) }, 'Reset password'),
+        el('button', { class: 'danger', type: 'button', onclick: () => doDelete(u) }, 'Delete'));
+    }
+    tbody.append(el('tr', {},
+      el('td', {}, u.username), el('td', {}, u.fullName || ''), el('td', {}, el('span', { class: 'badge' }, u.role)),
+      el('td', {}, u.isLocked ? el('span', { class: 'err' }, 'Locked') : el('span', { class: 'ok' }, 'Active')),
+      el('td', {}, u.lastLogin ? new Date(u.lastLogin).toLocaleString() : 'Never'),
+      el('td', {}, actions)));
+  });
+
+  const tableCard = el('div', { class: 'card' }, el('h2', {}, 'Users (' + j.users.length + ')'),
+    el('div', { class: 'scroll' }, el('table', {},
+      el('thead', {}, el('tr', {}, ['Username', 'Name', 'Role', 'Status', 'Last login', ''].map(h => el('th', {}, h)))), tbody)));
+
+  root.replaceChildren(formCard, tableCard);
+
+  async function doBlock(u) {
+    const block = !u.isLocked;
+    const reason = prompt((block ? 'Block ' : 'Unblock ') + u.username + '. Reason (optional):');
+    if (reason === null) return;
+    const r = await api('setBlocked', { userId: u.userId, blocked: block, reason: reason });
+    r.ok ? renderUserManagement(root) : alert(r.error);
+  }
+  async function doReset(u) {
+    const pw = prompt('New temporary password for ' + u.username + ' (8+ characters, letters and numbers):');
+    if (!pw) return;
+    const r = await api('resetPassword', { userId: u.userId, tempPassword: pw, reason: 'Reset by IT' });
+    r.ok ? (alert('Password reset. Give the temporary password to ' + u.username + '. They must change it at login.'), renderUserManagement(root)) : alert(r.error);
+  }
+  async function doDelete(u) {
+    if (!confirm('Delete ' + u.username + '? The record is kept in the audit log.')) return;
+    const reason = prompt('Reason for deleting:');
+    if (reason === null) return;
+    const r = await api('deleteUser', { userId: u.userId, reason: reason });
+    r.ok ? renderUserManagement(root) : alert(r.error);
+  }
+}
+
+/* ===== Start ===== */
+(async function start() {
+  if (token) { await showHome(); resetIdle(); } else { showLogin(''); }
+})();
+</script>
+</body>
+</html>
